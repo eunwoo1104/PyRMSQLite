@@ -12,7 +12,7 @@ clients_dict = {}
 
 def check_if_req_key_exist(req_keys, json_data):
     forgot = [x for x in req_keys if x not in json_data.keys()]
-    why_none = [x for x in json_data.keys() if x in req_keys and json_data[x] is None]
+    why_none = [x for x in json_data.keys() if x in req_keys and json_data[x] is None and x != "params"]
     if len(forgot) != 0:
         return flask_restful.abort(400, description=f"Wrong json format. You forgot: {', '.join(forgot)}")
     if len(why_none) != 0:
@@ -22,7 +22,7 @@ def check_if_req_key_exist(req_keys, json_data):
 
 def check_if_logged_in(ip, db_name):
     if ip not in clients_dict.keys():
-        return flask_restful.abort(400, description="Please login first!")
+        return flask_restful.abort(400, description="Please login first! Note: Login expires per 15 min.")
     count = 0
     for x in clients_dict[ip]:
         if db_name == x["db"]:
@@ -48,19 +48,47 @@ def get_login_info(login_id, pw):
         login_db.close()
 
 
+def process_sql(ip, json_data):
+    sqlite_db = sqlite3.connect("db/" + clients_dict[ip][0]["id"] + "_" + json_data["db_name"] + ".db")
+    sqlite_db.row_factory = sqlite3.Row
+    cur = sqlite_db.cursor()
+    try:
+        if json_data["res_required"] is True:
+            if json_data["params"] is None:
+                cur.execute(json_data["expression"])
+            else:
+                cur.execute(json_data["expression"], json_data["params"])
+            return {"result": [dict(x) for x in cur.fetchall()]}
+        if json_data["params"] is None:
+            sqlite_db.execute(json_data["expression"])
+        else:
+            sqlite_db.execute(json_data["expression"], json_data["params"])
+        sqlite_db.commit()
+    finally:
+        cur.close()
+        sqlite_db.close()
+
+
 def check_if_session_expired():
     while True:
+        del_tgt = []
+        exp_tgt = []
+        time_now = time.time()
         if bool(clients_dict):
             for a in clients_dict.keys():
                 if len(clients_dict[a]) != 0:
                     for b in clients_dict[a]:
-                        time_now = time.time()
                         logged_in_time = b["login_time"]
-                        if (time_now - logged_in_time) > 60 * 15:
-                            clients_dict[a].delete(b)
+                        if (time_now - logged_in_time) > 60 * 1:
+                            del_tgt.append((a, b))
+                            break
                 elif len(clients_dict[a]) == 0:
-                    del clients_dict[a]
-        print("check completed")
+                    exp_tgt.append(a)
+            for a, b in del_tgt:
+                clients_dict[a].remove(b)
+            if len(exp_tgt) != 0:
+                for c in exp_tgt:
+                    del clients_dict[c]
         time.sleep(1)
 
 
@@ -89,7 +117,7 @@ class SQLiteAPI(flask_restful.Resource):
     # noinspection PyMethodMayBeStatic
     def post(self):
         ip = flask.request.remote_addr
-        req_keys = ["db_name", "table", "type"]
+        req_keys = ["db_name", "res_required", "expression", "params"]
         json_data = flask.request.get_json(force=True)
         res = check_if_req_key_exist(req_keys, json_data)
         if res is not None:
@@ -97,10 +125,18 @@ class SQLiteAPI(flask_restful.Resource):
         is_logged_in = check_if_logged_in(ip, json_data["db_name"])
         if is_logged_in is not None:
             return is_logged_in
-        sqlite_db = sqlite3.connect("db/" + clients_dict[ip][0]["id"] + "_" + json_data["db_name"] + ".db")
-        sqlite_db.row_factory = sqlite3.Row
-        sqlite_db.close()
-        return
+        return process_sql(ip, json_data)
+
+
+class AdminSys(flask_restful.Resource):
+    # noinspection PyMethodMayBeStatic
+    def post(self):
+        ip = flask.request.remote_addr
+        req_keys = ["id", "pw", "action", "script"]
+        if ip != "172.0.0.1":
+            return flask_restful.abort(403, description="Unauthorized IP.")
+        json_data = flask.request.get_json(force=True)
+        res = check_if_req_key_exist(req_keys, json_data)
 
 
 api_dict = dict(sqlite_db=SQLiteAPI, login=LoginSQLiteAPI)
